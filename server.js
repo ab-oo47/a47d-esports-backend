@@ -41,19 +41,19 @@ app.post("/create-payment", async (req, res) => {
 
     const response = await axios.post(
       "https://tranzupi.com/api/create-order",
-      {
+      new URLSearchParams({
         customer_mobile: mobile || "9999999999",
         user_token: USER_TOKEN,
-        amount: Number(amount).toFixed(2), // 🔥 FIXED DECIMAL FORMAT
+        amount: Number(amount).toFixed(2),
         order_id: orderId,
         redirect_url:
           "https://a47d-esports-backend-1.onrender.com/payment-success",
         remark1: userId,
         remark2: "A47D Coins",
-      },
+      }),
       {
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
       }
     );
@@ -66,7 +66,7 @@ app.post("/create-payment", async (req, res) => {
       });
     }
 
-    // Save payment record
+    // Save payment record in Firestore
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
@@ -117,6 +117,7 @@ app.post("/tranzupi-webhook", async (req, res) => {
       return res.send("Already credited");
     }
 
+    // Credit wallet_balance
     await db.collection("users").doc(paymentData.userId).update({
       wallet_balance: admin.firestore.FieldValue.increment(
         paymentData.amount
