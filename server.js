@@ -4,25 +4,43 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ================= FIREBASE INIT =================
-const serviceAccount = require("./serviceAccountKey.json");
+// =================================================
+// FIREBASE INIT (FROM RENDER ENV VARIABLE)
+// =================================================
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.error("FIREBASE_SERVICE_ACCOUNT not set");
+  process.exit(1);
+}
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert(
+    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+  ),
 });
 
 const db = admin.firestore();
 
-// ================= ZAPUPI KEYS =================
+// =================================================
+// ZAPUPI KEYS
+// (Better to move these to ENV later for security)
+// =================================================
 const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
 const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
 // =================================================
-// ✅ CREATE PAYMENT
+// HEALTH CHECK ROUTE
+// =================================================
+app.get("/", (req, res) => {
+  res.send("Backend is running");
+});
+
+// =================================================
+// CREATE PAYMENT
 // =================================================
 app.post("/create-payment", async (req, res) => {
   try {
@@ -34,7 +52,7 @@ app.post("/create-payment", async (req, res) => {
 
     const orderId = "ORD" + Date.now();
 
-    const response = await axios.post(
+    const zapResponse = await axios.post(
       "https://api.zapupi.com/api/create-order",
       new URLSearchParams({
         token_key: TOKEN_KEY,
@@ -50,11 +68,13 @@ app.post("/create-payment", async (req, res) => {
       }
     );
 
-    if (response.data.status !== "success") {
-      return res.status(400).json({ error: response.data.message });
+    if (zapResponse.data.status !== "success") {
+      return res.status(400).json({
+        error: zapResponse.data.message || "Zap order failed",
+      });
     }
 
-    // Store payment in Firestore
+    // Save payment record
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
@@ -62,18 +82,19 @@ app.post("/create-payment", async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    res.json({
-      payment_url: response.data.payment_url,
+    return res.json({
+      payment_url: zapResponse.data.payment_url,
       order_id: orderId,
     });
+
   } catch (error) {
-    console.error("Create Payment Error:", error.message);
-    res.status(500).json({ error: "Payment creation failed" });
+    console.error("Create Payment Error:", error.response?.data || error.message);
+    return res.status(500).json({ error: "Payment creation failed" });
   }
 });
 
 // =================================================
-// ✅ VERIFY PAYMENT (Manual Fallback)
+// VERIFY PAYMENT (Manual Fallback)
 // =================================================
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -83,7 +104,7 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ error: "Missing orderId" });
     }
 
-    const response = await axios.post(
+    const zapResponse = await axios.post(
       "https://api.zapupi.com/api/order-status",
       new URLSearchParams({
         token_key: TOKEN_KEY,
@@ -97,7 +118,7 @@ app.post("/verify-payment", async (req, res) => {
       }
     );
 
-    if (response.data.status !== "success") {
+    if (zapResponse.data.status !== "success") {
       return res.status(400).json({ error: "Payment not successful" });
     }
 
@@ -123,17 +144,19 @@ app.post("/verify-payment", async (req, res) => {
 
     await paymentRef.update({
       credited: true,
+      verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    res.json({ status: "credited" });
+    return res.json({ status: "credited" });
+
   } catch (error) {
-    console.error("Verify Error:", error.message);
-    res.status(500).json({ error: "Verification failed" });
+    console.error("Verify Error:", error.response?.data || error.message);
+    return res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// ✅ ZAPUPI WEBHOOK (AUTO INSTANT CREDIT)
+// ZAPUPI WEBHOOK (INSTANT AUTO CREDIT)
 // =================================================
 app.post("/zap-webhook", async (req, res) => {
   try {
@@ -141,7 +164,7 @@ app.post("/zap-webhook", async (req, res) => {
 
     const { order_id, status } = req.body;
 
-    if (status !== "success") {
+    if (!order_id || status !== "success") {
       return res.send("Ignored");
     }
 
@@ -166,19 +189,22 @@ app.post("/zap-webhook", async (req, res) => {
 
     await paymentRef.update({
       credited: true,
+      webhookAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    res.send("Coins credited");
+    return res.send("Coins credited");
+
   } catch (error) {
     console.error("Webhook Error:", error.message);
-    res.status(500).send("Error");
+    return res.status(500).send("Error");
   }
 });
 
 // =================================================
-// 🚀 SERVER START
+// SERVER START (RENDER SAFE)
 // =================================================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
