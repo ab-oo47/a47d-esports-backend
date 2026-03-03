@@ -34,7 +34,7 @@ app.post("/create-payment", async (req, res) => {
       });
     }
 
-    const orderId = "ORD_" + Date.now();
+    const orderId = "ORD" + Math.floor(Date.now() / 1000);
 
     // Save payment as pending
     await db.collection("payments").doc(orderId).set({
