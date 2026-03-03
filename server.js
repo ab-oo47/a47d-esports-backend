@@ -106,20 +106,12 @@ app.post("/verify-payment", async (req, res) => {
       }
     );
 
-    const zapStatus = response.data.status;
+    console.log("FULL ZAP VERIFY RESPONSE:", response.data);
 
-    if (zapStatus === "success") {
-
-      const paymentRef = db.collection("payments").doc(orderId);
-      const paymentDoc = await paymentRef.get();
-
-      if (!paymentDoc.exists) {
-        return res.status(404).json({ error: "Payment record not found" });
-      }
-
-      if (paymentDoc.data().status === "success") {
-        return res.json({ status: "credited" });
-      }
+const zapStatus =
+  response.data.status === "success" ||
+  response.data.status === true ||
+  response.data.order_status === "SUCCESS";
 
       const { userId, amount } = paymentDoc.data();
 
