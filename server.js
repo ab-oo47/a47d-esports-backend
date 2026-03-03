@@ -11,6 +11,11 @@ app.use(express.json());
    🔐 FIREBASE INITIALIZATION
 ===================================== */
 
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.error("FIREBASE_SERVICE_ACCOUNT is missing!");
+  process.exit(1);
+}
+
 admin.initializeApp({
   credential: admin.credential.cert(
     JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
@@ -27,10 +32,16 @@ app.post("/create-payment", async (req, res) => {
   try {
     const { userId, amount, mobile } = req.body;
 
-    if (!userId || !amount || amount < 10) {
+    // Validation
+    if (!userId || !amount || amount < 10 || !mobile) {
       return res.status(400).json({
         error: "Invalid data. Minimum ₹10 required.",
       });
+    }
+
+    if (!process.env.SPACEPAY_PUBLIC_KEY || !process.env.SPACEPAY_SECRET_KEY) {
+      console.error("Spacepay keys missing in environment!");
+      return res.status(500).json({ error: "Payment configuration error" });
     }
 
     const orderId = "WALLET_" + Date.now();
@@ -50,7 +61,7 @@ app.post("/create-payment", async (req, res) => {
         public_key: process.env.SPACEPAY_PUBLIC_KEY,
         secret_key: process.env.SPACEPAY_SECRET_KEY,
         customer_mobile: mobile,
-        amount,
+        amount: amount,
         order_id: orderId,
         redirect_url:
           "https://a47d-esports-backend.onrender.com/payment-success",
@@ -58,10 +69,19 @@ app.post("/create-payment", async (req, res) => {
       }
     );
 
+    console.log("Spacepay success response:", response.data);
+
     return res.json(response.data);
   } catch (error) {
-    console.error("Payment error:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Payment failed" });
+    console.error("==== SPACEPAY ERROR FULL ====");
+    console.error("Status:", error.response?.status);
+    console.error("Data:", error.response?.data);
+    console.error("Message:", error.message);
+
+    return res.status(500).json({
+      error: "Payment failed",
+      details: error.response?.data || error.message,
+    });
   }
 });
 
@@ -84,16 +104,16 @@ app.post("/webhook", async (req, res) => {
       if (paymentDoc.exists && paymentDoc.data().status !== "success") {
         const { userId, amount } = paymentDoc.data();
 
-        // Add coins to wallet
         await db.collection("users").doc(userId).update({
           wallet_balance: admin.firestore.FieldValue.increment(amount),
         });
 
-        // Mark payment successful
         await paymentRef.update({
           status: "success",
           updatedAt: new Date(),
         });
+
+        console.log("Wallet credited:", userId, amount);
       }
     }
 
@@ -105,11 +125,11 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* =====================================
-   🔁 PAYMENT SUCCESS REDIRECT (ANDROID)
+   🔁 PAYMENT SUCCESS REDIRECT
 ===================================== */
 
 app.get("/payment-success", (req, res) => {
-  // Deep link back into Android app
+  // Android Deep Link
   res.redirect("a47d://a47d.com/payment-success");
 });
 
