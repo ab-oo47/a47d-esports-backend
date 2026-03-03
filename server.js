@@ -39,12 +39,16 @@ app.post("/create-payment", async (req, res) => {
 
     const orderId = "ORD" + Date.now();
 
+    // 🔥 IMPORTANT FIXES:
+    // - Use api.tranzupi.com
+    // - Convert amount to string
+
     const response = await axios.post(
-      "https://tranzupi.com/api/create-order",
+      "https://api.tranzupi.com/api/create-order",
       {
         customer_mobile: mobile || "9999999999",
         user_token: USER_TOKEN,
-        amount: amount,
+        amount: amount.toString(),
         order_id: orderId,
         redirect_url:
           "https://a47d-esports-backend-1.onrender.com/payment-success",
@@ -52,6 +56,8 @@ app.post("/create-payment", async (req, res) => {
         remark2: "A47D Coins",
       }
     );
+
+    console.log("Tranzupi Response:", response.data);
 
     if (!response.data.status) {
       return res.status(400).json({
@@ -71,12 +77,15 @@ app.post("/create-payment", async (req, res) => {
       payment_url: response.data.result.payment_url,
       order_id: orderId,
     });
+
   } catch (error) {
-    console.error(
-      "Create Payment Error:",
+    console.error("Create Payment Error:",
       error.response?.data || error.message
     );
-    return res.status(500).json({ error: "Payment creation failed" });
+
+    return res.status(500).json({
+      error: error.response?.data || error.message,
+    });
   }
 });
 
@@ -115,6 +124,7 @@ app.post("/tranzupi-webhook", async (req, res) => {
     await paymentRef.update({ credited: true });
 
     return res.send("Coins credited successfully");
+
   } catch (error) {
     console.error("Webhook Error:", error.message);
     return res.status(500).send("Webhook error");
@@ -125,7 +135,7 @@ app.post("/tranzupi-webhook", async (req, res) => {
 // SUCCESS PAGE
 // =================================================
 app.get("/payment-success", (req, res) => {
-  res.send("Payment successful. Return to the app.");
+  res.send("Payment successful. You can return to the app.");
 });
 
 // =================================================
