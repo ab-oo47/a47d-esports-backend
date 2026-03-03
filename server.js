@@ -44,7 +44,6 @@ app.post("/create-payment", async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Call ZapUPI Create Order
     const response = await axios.post(
       "https://api.zapupi.com/api/create-order",
       qs.stringify({
@@ -52,7 +51,7 @@ app.post("/create-payment", async (req, res) => {
         secret_key: process.env.ZAP_SECRET_KEY,
         amount: amount,
         order_id: orderId,
-        custumer_mobile: mobile,
+        customer_mobile: mobile,
         redirect_url:
           "https://a47d-esports-backend.onrender.com/zap-return",
         remark: "Wallet Topup",
@@ -110,21 +109,39 @@ app.post("/verify-payment", async (req, res) => {
     const zapStatus = response.data.status;
 
     if (zapStatus === "success") {
+
       const paymentRef = db.collection("payments").doc(orderId);
       const paymentDoc = await paymentRef.get();
 
-      if (paymentDoc.exists && paymentDoc.data().status !== "success") {
-        const { userId, amount } = paymentDoc.data();
+      if (!paymentDoc.exists) {
+        return res.status(404).json({ error: "Payment record not found" });
+      }
 
-        await db.collection("users").doc(userId).update({
+      if (paymentDoc.data().status === "success") {
+        return res.json({ status: "credited" });
+      }
+
+      const { userId, amount } = paymentDoc.data();
+
+      const userRef = db.collection("users").doc(userId);
+      const userDoc = await userRef.get();
+
+      // ✅ AUTO CREATE USER IF NOT EXISTS
+      if (!userDoc.exists) {
+        await userRef.set({
+          wallet_balance: amount,
+          createdAt: new Date(),
+        });
+      } else {
+        await userRef.update({
           wallet_balance: admin.firestore.FieldValue.increment(amount),
         });
-
-        await paymentRef.update({
-          status: "success",
-          updatedAt: new Date(),
-        });
       }
+
+      await paymentRef.update({
+        status: "success",
+        updatedAt: new Date(),
+      });
 
       return res.json({ status: "credited" });
     }
