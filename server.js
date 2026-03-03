@@ -44,12 +44,17 @@ app.post("/create-payment", async (req, res) => {
       {
         customer_mobile: mobile || "9999999999",
         user_token: USER_TOKEN,
-        amount: amount.toString(),
+        amount: Number(amount).toFixed(2), // 🔥 FIXED DECIMAL FORMAT
         order_id: orderId,
         redirect_url:
           "https://a47d-esports-backend-1.onrender.com/payment-success",
         remark1: userId,
         remark2: "A47D Coins",
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
       }
     );
 
