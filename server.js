@@ -39,12 +39,8 @@ app.post("/create-payment", async (req, res) => {
 
     const orderId = "ORD" + Date.now();
 
-    // 🔥 IMPORTANT FIXES:
-    // - Use api.tranzupi.com
-    // - Convert amount to string
-
     const response = await axios.post(
-      "https://api.tranzupi.com/api/create-order",
+      "https://tranzupi.com/api/create-order",
       {
         customer_mobile: mobile || "9999999999",
         user_token: USER_TOKEN,
@@ -79,7 +75,8 @@ app.post("/create-payment", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Create Payment Error:",
+    console.error(
+      "Create Payment Error:",
       error.response?.data || error.message
     );
 
@@ -90,7 +87,7 @@ app.post("/create-payment", async (req, res) => {
 });
 
 // =================================================
-// TRANZUPI WEBHOOK
+// TRANZUPI WEBHOOK (AUTO CREDIT)
 // =================================================
 app.post("/tranzupi-webhook", async (req, res) => {
   try {
