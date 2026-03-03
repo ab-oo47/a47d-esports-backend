@@ -36,7 +36,6 @@ app.post("/create-payment", async (req, res) => {
 
     const orderId = "ORD" + Math.floor(Math.random() * 1000000);
 
-    // Save payment as pending
     await db.collection("payments").doc(orderId).set({
       userId,
       amount,
@@ -81,7 +80,7 @@ app.post("/create-payment", async (req, res) => {
 });
 
 /* =====================================
-   🔎 VERIFY PAYMENT
+   🔎 VERIFY PAYMENT (Manual Backup)
 ===================================== */
 
 app.post("/verify-payment", async (req, res) => {
@@ -106,39 +105,48 @@ app.post("/verify-payment", async (req, res) => {
       }
     );
 
-    console.log("FULL ZAP VERIFY RESPONSE:", response.data);
+    const zapSuccess =
+      response.data.status === "success" ||
+      response.data.status === true ||
+      response.data.order_status === "SUCCESS";
 
-const zapStatus =
-  response.data.status === "success" ||
-  response.data.status === true ||
-  response.data.order_status === "SUCCESS";
+    if (!zapSuccess) {
+      return res.json({ status: "pending" });
+    }
 
-      const { userId, amount } = paymentDoc.data();
+    const paymentRef = db.collection("payments").doc(orderId);
+    const paymentDoc = await paymentRef.get();
 
-      const userRef = db.collection("users").doc(userId);
-      const userDoc = await userRef.get();
+    if (!paymentDoc.exists) {
+      return res.status(404).json({ error: "Payment record not found" });
+    }
 
-      // ✅ AUTO CREATE USER IF NOT EXISTS
-      if (!userDoc.exists) {
-        await userRef.set({
-          wallet_balance: amount,
-          createdAt: new Date(),
-        });
-      } else {
-        await userRef.update({
-          wallet_balance: admin.firestore.FieldValue.increment(amount),
-        });
-      }
-
-      await paymentRef.update({
-        status: "success",
-        updatedAt: new Date(),
-      });
-
+    if (paymentDoc.data().status === "success") {
       return res.json({ status: "credited" });
     }
 
-    return res.json({ status: "pending" });
+    const { userId, amount } = paymentDoc.data();
+
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      await userRef.set({
+        wallet_balance: amount,
+        createdAt: new Date(),
+      });
+    } else {
+      await userRef.update({
+        wallet_balance: admin.firestore.FieldValue.increment(amount),
+      });
+    }
+
+    await paymentRef.update({
+      status: "success",
+      updatedAt: new Date(),
+    });
+
+    return res.json({ status: "credited" });
 
   } catch (error) {
     console.error("Verify Error:", error.response?.data || error.message);
@@ -147,11 +155,70 @@ const zapStatus =
 });
 
 /* =====================================
-   🔁 REDIRECT BACK TO APP
+   🔁 AUTO CREDIT ON ZAP RETURN
 ===================================== */
 
-app.get("/zap-return", (req, res) => {
-  res.redirect("a47d://a47d.com/payment-success");
+app.get("/zap-return", async (req, res) => {
+  try {
+    const { order_id } = req.query;
+
+    if (!order_id) {
+      return res.redirect("a47d://a47d.com/payment-success");
+    }
+
+    const response = await axios.post(
+      "https://api.zapupi.com/api/order-status",
+      qs.stringify({
+        token_key: process.env.ZAP_TOKEN_KEY,
+        secret_key: process.env.ZAP_SECRET_KEY,
+        order_id: order_id,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    const zapSuccess =
+      response.data.status === "success" ||
+      response.data.status === true ||
+      response.data.order_status === "SUCCESS";
+
+    if (zapSuccess) {
+      const paymentRef = db.collection("payments").doc(order_id);
+      const paymentDoc = await paymentRef.get();
+
+      if (paymentDoc.exists && paymentDoc.data().status !== "success") {
+        const { userId, amount } = paymentDoc.data();
+
+        const userRef = db.collection("users").doc(userId);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+          await userRef.set({
+            wallet_balance: amount,
+            createdAt: new Date(),
+          });
+        } else {
+          await userRef.update({
+            wallet_balance: admin.firestore.FieldValue.increment(amount),
+          });
+        }
+
+        await paymentRef.update({
+          status: "success",
+          updatedAt: new Date(),
+        });
+      }
+    }
+
+    res.redirect("a47d://a47d.com/payment-success");
+
+  } catch (error) {
+    console.error("Return Error:", error.message);
+    res.redirect("a47d://a47d.com/payment-success");
+  }
 });
 
 /* =====================================
