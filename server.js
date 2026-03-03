@@ -2,58 +2,46 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const qs = require("querystring");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-/* =====================================
-   🔐 FIREBASE INITIALIZATION
-===================================== */
+// ================= FIREBASE INIT =================
+const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
-  credential: admin.credential.cert(
-    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  ),
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const db = admin.firestore();
 
-/* =====================================
-   💳 CREATE PAYMENT (ZapUPI)
-===================================== */
+// ================= ZAPUPI KEYS =================
+const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
+const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
+// =================================================
+// ✅ CREATE PAYMENT
+// =================================================
 app.post("/create-payment", async (req, res) => {
   try {
     const { userId, amount, mobile } = req.body;
 
-    if (!userId || !amount || amount < 10) {
-      return res.status(400).json({
-        error: "Invalid data. Minimum ₹10 required.",
-      });
+    if (!userId || !amount) {
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    const orderId = "ORD" + Math.floor(Math.random() * 1000000);
-
-    await db.collection("payments").doc(orderId).set({
-      userId,
-      amount,
-      status: "pending",
-      createdAt: new Date(),
-    });
+    const orderId = "ORD" + Date.now();
 
     const response = await axios.post(
       "https://api.zapupi.com/api/create-order",
-      qs.stringify({
-        token_key: process.env.ZAP_TOKEN_KEY,
-        secret_key: process.env.ZAP_SECRET_KEY,
+      new URLSearchParams({
+        token_key: TOKEN_KEY,
+        secret_key: SECRET_KEY,
         amount: amount,
         order_id: orderId,
-        customer_mobile: mobile,
-        redirect_url:
-          "https://a47d-esports-backend.onrender.com/zap-return",
-        remark: "Wallet Topup",
+        custumer_mobile: mobile || "",
       }),
       {
         headers: {
@@ -63,39 +51,43 @@ app.post("/create-payment", async (req, res) => {
     );
 
     if (response.data.status !== "success") {
-      return res.status(400).json({
-        error: response.data.message || "Failed to create order",
-      });
+      return res.status(400).json({ error: response.data.message });
     }
 
-    return res.json({
+    // Store payment in Firestore
+    await db.collection("payments").doc(orderId).set({
+      userId,
+      amount: Number(amount),
+      credited: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({
       payment_url: response.data.payment_url,
       order_id: orderId,
     });
-
   } catch (error) {
-    console.error("Create Payment Error:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Payment creation failed" });
+    console.error("Create Payment Error:", error.message);
+    res.status(500).json({ error: "Payment creation failed" });
   }
 });
 
-/* =====================================
-   🔎 VERIFY PAYMENT (Manual Backup)
-===================================== */
-
+// =================================================
+// ✅ VERIFY PAYMENT (Manual Fallback)
+// =================================================
 app.post("/verify-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
 
     if (!orderId) {
-      return res.status(400).json({ error: "Order ID required" });
+      return res.status(400).json({ error: "Missing orderId" });
     }
 
     const response = await axios.post(
       "https://api.zapupi.com/api/order-status",
-      qs.stringify({
-        token_key: process.env.ZAP_TOKEN_KEY,
-        secret_key: process.env.ZAP_SECRET_KEY,
+      new URLSearchParams({
+        token_key: TOKEN_KEY,
+        secret_key: SECRET_KEY,
         order_id: orderId,
       }),
       {
@@ -105,128 +97,88 @@ app.post("/verify-payment", async (req, res) => {
       }
     );
 
-    const zapSuccess =
-      response.data.status === "success" ||
-      response.data.status === true ||
-      response.data.order_status === "SUCCESS";
-
-    if (!zapSuccess) {
-      return res.json({ status: "pending" });
+    if (response.data.status !== "success") {
+      return res.status(400).json({ error: "Payment not successful" });
     }
 
     const paymentRef = db.collection("payments").doc(orderId);
-    const paymentDoc = await paymentRef.get();
+    const paymentSnap = await paymentRef.get();
 
-    if (!paymentDoc.exists) {
+    if (!paymentSnap.exists) {
       return res.status(404).json({ error: "Payment record not found" });
     }
 
-    if (paymentDoc.data().status === "success") {
-      return res.json({ status: "credited" });
+    const paymentData = paymentSnap.data();
+
+    if (paymentData.credited) {
+      return res.json({ status: "already_credited" });
     }
 
-    const { userId, amount } = paymentDoc.data();
+    // Credit coins
+    const userRef = db.collection("users").doc(paymentData.userId);
 
-    const userRef = db.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
-      await userRef.set({
-        wallet_balance: amount,
-        createdAt: new Date(),
-      });
-    } else {
-      await userRef.update({
-        wallet_balance: admin.firestore.FieldValue.increment(amount),
-      });
-    }
-
-    await paymentRef.update({
-      status: "success",
-      updatedAt: new Date(),
+    await userRef.update({
+      coins: admin.firestore.FieldValue.increment(paymentData.amount),
     });
 
-    return res.json({ status: "credited" });
+    await paymentRef.update({
+      credited: true,
+    });
 
+    res.json({ status: "credited" });
   } catch (error) {
-    console.error("Verify Error:", error.response?.data || error.message);
-    return res.status(500).json({ error: "Verification failed" });
+    console.error("Verify Error:", error.message);
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
-/* =====================================
-   🔁 AUTO CREDIT ON ZAP RETURN
-===================================== */
-
-app.get("/zap-return", async (req, res) => {
+// =================================================
+// ✅ ZAPUPI WEBHOOK (AUTO INSTANT CREDIT)
+// =================================================
+app.post("/zap-webhook", async (req, res) => {
   try {
-    const { order_id } = req.query;
+    console.log("Webhook Received:", req.body);
 
-    if (!order_id) {
-      return res.redirect("a47d://a47d.com/payment-success");
+    const { order_id, status } = req.body;
+
+    if (status !== "success") {
+      return res.send("Ignored");
     }
 
-    const response = await axios.post(
-      "https://api.zapupi.com/api/order-status",
-      qs.stringify({
-        token_key: process.env.ZAP_TOKEN_KEY,
-        secret_key: process.env.ZAP_SECRET_KEY,
-        order_id: order_id,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
+    const paymentRef = db.collection("payments").doc(order_id);
+    const paymentSnap = await paymentRef.get();
 
-    const zapSuccess =
-      response.data.status === "success" ||
-      response.data.status === true ||
-      response.data.order_status === "SUCCESS";
-
-    if (zapSuccess) {
-      const paymentRef = db.collection("payments").doc(order_id);
-      const paymentDoc = await paymentRef.get();
-
-      if (paymentDoc.exists && paymentDoc.data().status !== "success") {
-        const { userId, amount } = paymentDoc.data();
-
-        const userRef = db.collection("users").doc(userId);
-        const userDoc = await userRef.get();
-
-        if (!userDoc.exists) {
-          await userRef.set({
-            wallet_balance: amount,
-            createdAt: new Date(),
-          });
-        } else {
-          await userRef.update({
-            wallet_balance: admin.firestore.FieldValue.increment(amount),
-          });
-        }
-
-        await paymentRef.update({
-          status: "success",
-          updatedAt: new Date(),
-        });
-      }
+    if (!paymentSnap.exists) {
+      return res.status(404).send("Payment not found");
     }
 
-    res.redirect("a47d://a47d.com/payment-success");
+    const paymentData = paymentSnap.data();
 
+    if (paymentData.credited) {
+      return res.send("Already credited");
+    }
+
+    const userRef = db.collection("users").doc(paymentData.userId);
+
+    await userRef.update({
+      coins: admin.firestore.FieldValue.increment(paymentData.amount),
+    });
+
+    await paymentRef.update({
+      credited: true,
+    });
+
+    res.send("Coins credited");
   } catch (error) {
-    console.error("Return Error:", error.message);
-    res.redirect("a47d://a47d.com/payment-success");
+    console.error("Webhook Error:", error.message);
+    res.status(500).send("Error");
   }
 });
 
-/* =====================================
-   🚀 START SERVER
-===================================== */
-
+// =================================================
+// 🚀 SERVER START
+// =================================================
 const PORT = process.env.PORT || 10000;
-
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+  console.log(`Server running on port ${PORT}`);
 });
