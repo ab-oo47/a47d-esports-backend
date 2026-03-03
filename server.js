@@ -7,9 +7,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================================
+/* =====================================
    🔐 FIREBASE INITIALIZATION
-================================ */
+===================================== */
 
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -19,9 +19,9 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* ================================
+/* =====================================
    💳 CREATE PAYMENT
-================================ */
+===================================== */
 
 app.post("/create-payment", async (req, res) => {
   try {
@@ -52,7 +52,8 @@ app.post("/create-payment", async (req, res) => {
         customer_mobile: mobile,
         amount,
         order_id: orderId,
-        redirect_url: "https://yourapp.com/payment-status",
+        redirect_url:
+          "https://a47d-esports-backend.onrender.com/payment-success",
         note: "Wallet Top-up",
       }
     );
@@ -64,9 +65,9 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
-/* ================================
+/* =====================================
    🔔 SPACEPAY WEBHOOK
-================================ */
+===================================== */
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -83,7 +84,7 @@ app.post("/webhook", async (req, res) => {
       if (paymentDoc.exists && paymentDoc.data().status !== "success") {
         const { userId, amount } = paymentDoc.data();
 
-        // Add coins to user wallet
+        // Add coins to wallet
         await db.collection("users").doc(userId).update({
           wallet_balance: admin.firestore.FieldValue.increment(amount),
         });
@@ -103,9 +104,18 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ================================
+/* =====================================
+   🔁 PAYMENT SUCCESS REDIRECT (ANDROID)
+===================================== */
+
+app.get("/payment-success", (req, res) => {
+  // Deep link back into Android app
+  res.redirect("a47d://a47d.com/payment-success");
+});
+
+/* =====================================
    🚀 START SERVER
-================================ */
+===================================== */
 
 const PORT = process.env.PORT || 3000;
 
