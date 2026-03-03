@@ -2,19 +2,13 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const qs = require("querystring");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* =====================================
-   🔐 FIREBASE INITIALIZATION
-===================================== */
-
-if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-  console.error("FIREBASE_SERVICE_ACCOUNT is missing!");
-  process.exit(1);
-}
+/* ================= FIREBASE ================= */
 
 admin.initializeApp({
   credential: admin.credential.cert(
@@ -24,29 +18,19 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-/* =====================================
-   💳 CREATE PAYMENT
-===================================== */
+/* ================= CREATE PAYMENT ================= */
 
 app.post("/create-payment", async (req, res) => {
   try {
     const { userId, amount, mobile } = req.body;
 
-    // Validation
-    if (!userId || !amount || amount < 10 || !mobile) {
-      return res.status(400).json({
-        error: "Invalid data. Minimum ₹10 required.",
-      });
+    if (!userId || !amount || amount < 10) {
+      return res.status(400).json({ error: "Invalid amount" });
     }
 
-    if (!process.env.SPACEPAY_PUBLIC_KEY || !process.env.SPACEPAY_SECRET_KEY) {
-      console.error("Spacepay keys missing in environment!");
-      return res.status(500).json({ error: "Payment configuration error" });
-    }
+    const orderId = "ORD_" + Date.now();
 
-    const orderId = "WALLET_" + Date.now();
-
-    // Save payment as pending
+    // Save pending order
     await db.collection("payments").doc(orderId).set({
       userId,
       amount,
@@ -54,88 +38,94 @@ app.post("/create-payment", async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Call Spacepay API
     const response = await axios.post(
-      "https://spacepay.in/api/payment/v1/pay",
-      {
-        public_key: process.env.SPACEPAY_PUBLIC_KEY,
-        secret_key: process.env.SPACEPAY_SECRET_KEY,
-        customer_mobile: mobile,
+      "https://api.zapupi.com/api/create-order",
+      qs.stringify({
+        token_key: process.env.ZAP_TOKEN_KEY,
+        secret_key: process.env.ZAP_SECRET_KEY,
         amount: amount,
         order_id: orderId,
+        custumer_mobile: mobile,
         redirect_url:
-          "https://a47d-esports-backend.onrender.com/payment-success",
-        note: "Wallet Top-up",
+          "https://a47d-esports-backend.onrender.com/zap-return",
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
       }
     );
 
-    console.log("Spacepay success response:", response.data);
+    if (response.data.status !== "success") {
+      return res.status(400).json({ error: response.data.message });
+    }
 
-    return res.json(response.data);
-  } catch (error) {
-    console.error("==== SPACEPAY ERROR FULL ====");
-    console.error("Status:", error.response?.status);
-    console.error("Data:", error.response?.data);
-    console.error("Message:", error.message);
-
-    return res.status(500).json({
-      error: "Payment failed",
-      details: error.response?.data || error.message,
+    return res.json({
+      payment_url: response.data.payment_url,
+      order_id: orderId,
     });
-  }
-});
-
-/* =====================================
-   🔔 SPACEPAY WEBHOOK
-===================================== */
-
-app.post("/webhook", async (req, res) => {
-  try {
-    const { order_id, status } = req.body;
-
-    if (!order_id) {
-      return res.status(400).send("Invalid webhook");
-    }
-
-    if (status === "SUCCESS") {
-      const paymentRef = db.collection("payments").doc(order_id);
-      const paymentDoc = await paymentRef.get();
-
-      if (paymentDoc.exists && paymentDoc.data().status !== "success") {
-        const { userId, amount } = paymentDoc.data();
-
-        await db.collection("users").doc(userId).update({
-          wallet_balance: admin.firestore.FieldValue.increment(amount),
-        });
-
-        await paymentRef.update({
-          status: "success",
-          updatedAt: new Date(),
-        });
-
-        console.log("Wallet credited:", userId, amount);
-      }
-    }
-
-    return res.send("OK");
   } catch (error) {
-    console.error("Webhook error:", error.message);
-    return res.status(500).send("Error");
+    console.error(error.response?.data || error.message);
+    return res.status(500).json({ error: "Zap payment failed" });
   }
 });
 
-/* =====================================
-   🔁 PAYMENT SUCCESS REDIRECT
-===================================== */
+/* ================= VERIFY PAYMENT ================= */
 
-app.get("/payment-success", (req, res) => {
-  // Android Deep Link
+app.post("/verify-payment", async (req, res) => {
+  try {
+    const { orderId } = req.body;
+
+    const paymentRef = db.collection("payments").doc(orderId);
+    const paymentDoc = await paymentRef.get();
+
+    if (!paymentDoc.exists) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const response = await axios.post(
+      "https://api.zapupi.com/api/order-status",
+      qs.stringify({
+        token_key: process.env.ZAP_TOKEN_KEY,
+        secret_key: process.env.ZAP_SECRET_KEY,
+        order_id: orderId,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    if (response.data.status === "success") {
+      const { userId, amount } = paymentDoc.data();
+
+      await db.collection("users").doc(userId).update({
+        wallet_balance: admin.firestore.FieldValue.increment(amount),
+      });
+
+      await paymentRef.update({
+        status: "success",
+        updatedAt: new Date(),
+      });
+
+      return res.json({ status: "credited" });
+    } else {
+      return res.json({ status: "pending" });
+    }
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    return res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+/* ================= RETURN REDIRECT ================= */
+
+app.get("/zap-return", (req, res) => {
   res.redirect("a47d://a47d.com/payment-success");
 });
 
-/* =====================================
-   🚀 START SERVER
-===================================== */
+/* ================= START SERVER ================= */
 
 const PORT = process.env.PORT || 3000;
 
