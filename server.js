@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ================= FIREBASE INIT (Render ENV) =================
+// ================= FIREBASE INIT =================
 admin.initializeApp({
   credential: admin.credential.cert(
     JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
@@ -18,11 +18,11 @@ admin.initializeApp({
 const db = admin.firestore();
 
 // ================= ZAPUPI KEYS =================
-const TOKEN_KEY = process.env.ZAP_TOKEN_KEY;
-const SECRET_KEY = process.env.ZAP_SECRET_KEY;
+const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
+const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
 // =================================================
-// HEALTH CHECK (IMPORTANT FOR RENDER)
+// HEALTH CHECK (FOR RENDER)
 // =================================================
 app.get("/", (req, res) => {
   res.send("Backend is running");
@@ -61,7 +61,7 @@ app.post("/create-payment", async (req, res) => {
       return res.status(400).json({ error: response.data.message });
     }
 
-    // Store payment record
+    // Save payment in Firestore
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
@@ -74,7 +74,7 @@ app.post("/create-payment", async (req, res) => {
       order_id: orderId,
     });
   } catch (error) {
-    console.error("Create Payment Error:", error.message);
+    console.error("Create Payment Error:", error.response?.data || error.message);
     res.status(500).json({ error: "Payment creation failed" });
   }
 });
@@ -117,31 +117,25 @@ app.post("/verify-payment", async (req, res) => {
 
     const paymentData = paymentSnap.data();
 
-    // Prevent double credit
     if (paymentData.credited) {
       return res.json({ status: "already_credited" });
     }
 
-    // Credit wallet_balance
     await db.collection("users").doc(paymentData.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(
-        paymentData.amount
-      ),
+      wallet_balance: admin.firestore.FieldValue.increment(paymentData.amount),
     });
 
-    await paymentRef.update({
-      credited: true,
-    });
+    await paymentRef.update({ credited: true });
 
     res.json({ status: "credited" });
   } catch (error) {
-    console.error("Verify Error:", error.message);
+    console.error("Verify Error:", error.response?.data || error.message);
     res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// ZAPUPI WEBHOOK (AUTO CREDIT)
+// WEBHOOK (AUTO CREDIT)
 // =================================================
 app.post("/zap-webhook", async (req, res) => {
   try {
@@ -167,18 +161,14 @@ app.post("/zap-webhook", async (req, res) => {
     }
 
     await db.collection("users").doc(paymentData.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(
-        paymentData.amount
-      ),
+      wallet_balance: admin.firestore.FieldValue.increment(paymentData.amount),
     });
 
-    await paymentRef.update({
-      credited: true,
-    });
+    await paymentRef.update({ credited: true });
 
     res.send("Coins credited");
   } catch (error) {
-    console.error("Webhook Error:", error.message);
+    console.error("Webhook Error:", error.response?.data || error.message);
     res.status(500).send("Error");
   }
 });
