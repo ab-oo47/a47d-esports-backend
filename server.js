@@ -16,14 +16,15 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ================= TRANZUPI TOKEN =================
-const USER_TOKEN = "35025ffc5d8d5afc760c6bb54de30c8a";
+// ================= ZAPUPI KEYS =================
+const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
+const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
 // =================================================
 // HEALTH CHECK
 // =================================================
 app.get("/", (req, res) => {
-  res.send("Tranzupi Backend Running");
+  res.send("ZapUPI Backend Running");
 });
 
 // =================================================
@@ -34,22 +35,21 @@ app.post("/create-payment", async (req, res) => {
     const { userId, amount, mobile } = req.body;
 
     if (!userId || !amount) {
-      return res.status(400).json({ error: "Missing userId or amount" });
+      return res.status(400).json({
+        error: "Missing userId or amount",
+      });
     }
 
     const orderId = "ORD" + Date.now();
 
     const response = await axios.post(
-      "https://tranzupi.com/api/create-order",
+      "https://api.zapupi.com/api/create-order",
       new URLSearchParams({
-        customer_mobile: mobile || "9999999999",
-        user_token: USER_TOKEN,
-        amount: Number(amount).toFixed(2),
+        token_key: TOKEN_KEY,
+        secret_key: SECRET_KEY,
+        amount: Number(amount),
         order_id: orderId,
-        redirect_url:
-          "https://a47d-esports-backend-1.onrender.com/payment-success",
-        remark1: userId,
-        remark2: "A47D Coins",
+        custumer_mobile: mobile || "",
       }),
       {
         headers: {
@@ -58,24 +58,24 @@ app.post("/create-payment", async (req, res) => {
       }
     );
 
-    console.log("Tranzupi Response:", response.data);
+    console.log("ZapUPI Response:", response.data);
 
-    if (!response.data.status) {
+    if (response.data.status !== "success") {
       return res.status(400).json({
-        error: response.data.message || "Tranzupi error",
+        error: response.data.message,
       });
     }
 
-    // Save payment record in Firestore
+    // Save payment record
     await db.collection("payments").doc(orderId).set({
-      userId,
+      userId: userId,
       amount: Number(amount),
       credited: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return res.json({
-      payment_url: response.data.result.payment_url,
+    res.json({
+      payment_url: response.data.payment_url,
       order_id: orderId,
     });
 
@@ -85,17 +85,86 @@ app.post("/create-payment", async (req, res) => {
       error.response?.data || error.message
     );
 
-    return res.status(500).json({
-      error: error.response?.data || error.message,
+    res.status(500).json({
+      error: "Payment creation failed",
     });
   }
 });
 
 // =================================================
-// TRANZUPI WEBHOOK (AUTO CREDIT)
+// VERIFY PAYMENT (MANUAL CHECK)
 // =================================================
-app.post("/tranzupi-webhook", async (req, res) => {
+app.post("/verify-payment", async (req, res) => {
   try {
+
+    const { orderId } = req.body;
+
+    const response = await axios.post(
+      "https://api.zapupi.com/api/order-status",
+      new URLSearchParams({
+        token_key: TOKEN_KEY,
+        secret_key: SECRET_KEY,
+        order_id: orderId,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    if (response.data.status !== "success") {
+      return res.json({
+        status: "pending",
+      });
+    }
+
+    const paymentRef = db.collection("payments").doc(orderId);
+    const paymentSnap = await paymentRef.get();
+
+    if (!paymentSnap.exists) {
+      return res.status(404).json({
+        error: "Payment record not found",
+      });
+    }
+
+    const paymentData = paymentSnap.data();
+
+    if (paymentData.credited) {
+      return res.json({
+        status: "already_credited",
+      });
+    }
+
+    await db.collection("users").doc(paymentData.userId).update({
+      wallet_balance: admin.firestore.FieldValue.increment(
+        paymentData.amount
+      ),
+    });
+
+    await paymentRef.update({
+      credited: true,
+    });
+
+    res.json({
+      status: "credited",
+    });
+
+  } catch (error) {
+    console.error("Verify Error:", error.message);
+
+    res.status(500).json({
+      error: "Verification failed",
+    });
+  }
+});
+
+// =================================================
+// ZAPUPI WEBHOOK
+// =================================================
+app.post("/zap-webhook", async (req, res) => {
+  try {
+
     console.log("Webhook Received:", req.body);
 
     const { order_id, status } = req.body;
@@ -117,20 +186,23 @@ app.post("/tranzupi-webhook", async (req, res) => {
       return res.send("Already credited");
     }
 
-    // Credit wallet_balance
     await db.collection("users").doc(paymentData.userId).update({
       wallet_balance: admin.firestore.FieldValue.increment(
         paymentData.amount
       ),
     });
 
-    await paymentRef.update({ credited: true });
+    await paymentRef.update({
+      credited: true,
+    });
 
-    return res.send("Coins credited successfully");
+    res.send("Coins credited");
 
   } catch (error) {
+
     console.error("Webhook Error:", error.message);
-    return res.status(500).send("Webhook error");
+
+    res.status(500).send("Webhook error");
   }
 });
 
