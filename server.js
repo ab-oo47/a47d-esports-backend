@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ================= FIREBASE INIT =================
+// ================= FIREBASE =================
 admin.initializeApp({
   credential: admin.credential.cert(
     JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
@@ -24,16 +24,12 @@ const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
 const IMB_BASE_URL = "https://secure-stage.imb.org.in/";
 
-// =================================================
-// HEALTH CHECK
-// =================================================
+// ================= HEALTH =================
 app.get("/", (req, res) => {
   res.send("Backend Running");
 });
 
-// =================================================
-// CREATE PAYMENT (ZAPUPI)
-// =================================================
+// ================= CREATE PAYMENT =================
 app.post("/create-payment", async (req, res) => {
   try {
     const { userId, amount, mobile } = req.body;
@@ -82,9 +78,7 @@ app.post("/create-payment", async (req, res) => {
   }
 });
 
-// =================================================
-// VERIFY PAYMENT (ZAPUPI)
-// =================================================
+// ================= VERIFY PAYMENT =================
 app.post("/verify-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -133,9 +127,7 @@ app.post("/verify-payment", async (req, res) => {
   }
 });
 
-// =================================================
-// CREATE ORDER (IMB)  ✅ FIXED
-// =================================================
+// ================= CREATE ORDER (IMB FIXED) =================
 app.post("/create-order-imb", async (req, res) => {
   try {
     const { userId, amount, mobile } = req.body;
@@ -148,16 +140,16 @@ app.post("/create-order-imb", async (req, res) => {
 
     const response = await axios.post(
       `${IMB_BASE_URL}api/create-order`,
-      {
+      new URLSearchParams({
         order_id: orderId,
-        amount: Number(amount), // ✅ FIXED (no toFixed)
+        amount: Number(amount), // ✅ number
         customer_mobile: mobile || "",
         redirect_url: "https://a47d.flutterflow.app/success"
-      },
+      }),
       {
         headers: {
           Authorization: `Bearer ${IMB_API_TOKEN}`,
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
       }
     );
@@ -190,9 +182,7 @@ app.post("/create-order-imb", async (req, res) => {
   }
 });
 
-// =================================================
-// VERIFY PAYMENT (IMB)
-// =================================================
+// ================= VERIFY IMB =================
 app.post("/verify-imb", async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -240,9 +230,7 @@ app.post("/verify-imb", async (req, res) => {
   }
 });
 
-// =================================================
-// WEBHOOK (IMB)
-// =================================================
+// ================= WEBHOOK =================
 app.post("/imb-webhook", async (req, res) => {
   try {
     const order_id = req.body.order_id;
@@ -274,9 +262,7 @@ app.post("/imb-webhook", async (req, res) => {
   }
 });
 
-// =================================================
-// START SERVER
-// =================================================
+// ================= START =================
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
