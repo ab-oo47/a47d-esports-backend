@@ -16,18 +16,19 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ================= ZAPUPI KEYS =================
+// ================= ZAPUPI =================
 const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
 const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
-// ================= SHADOWPAY =================
-const SHADOWPAY_TOKEN = process.env.SHADOWPAY_TOKEN;
+// ================= IMB =================
+const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
+const IMB_BASE_URL = "https://secure-stage.imb.org.in/";
 
 // =================================================
 // HEALTH CHECK
 // =================================================
 app.get("/", (req, res) => {
-  res.send("Backend Running (ZapUPI + ShadowPay)");
+  res.send("Backend Running");
 });
 
 // =================================================
@@ -38,9 +39,7 @@ app.post("/create-payment", async (req, res) => {
     const { userId, amount, mobile } = req.body;
 
     if (!userId || !amount) {
-      return res.status(400).json({
-        error: "Missing userId or amount",
-      });
+      return res.status(400).json({ error: "Missing data" });
     }
 
     const orderId = "ORD" + Date.now();
@@ -61,106 +60,25 @@ app.post("/create-payment", async (req, res) => {
       }
     );
 
-    console.log("ZapUPI Response:", response.data);
-
     if (response.data.status !== "success") {
-      return res.status(400).json({
-        error: response.data.message,
-      });
+      return res.status(400).json({ error: response.data.message });
     }
 
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
       credited: false,
-      gateway: "zapupi",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return res.json({
+    res.json({
       payment_url: response.data.payment_url,
       order_id: orderId,
     });
-  } catch (error) {
-    console.error(
-      "ZapUPI Error:",
-      error.response?.data || error.message
-    );
 
-    return res.status(500).json({
-      error: "Payment creation failed",
-    });
-  }
-});
-
-// =================================================
-// CREATE ORDER (SHADOWPAY)
-// =================================================
-app.post("/create-order-shadowpay", async (req, res) => {
-  try {
-    const { userId, amount, mobile } = req.body;
-
-    if (!userId || !amount) {
-      return res.status(400).json({
-        error: "Missing userId or amount",
-      });
-    }
-
-    const orderId = "SP" + Date.now();
-
-    const params = new URLSearchParams();
-    params.append("customer_mobile", mobile || "");
-    params.append("user_token", SHADOWPAY_TOKEN);
-    params.append("amount", amount);
-    params.append("order_id", orderId);
-    params.append(
-      "redirect_url",
-      "https://yourapp.flutterflow.app/success"
-    );
-
-    const response = await axios.post(
-      "https://www.pay.shadowlink.in/api/create-order",
-      params,
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-
-    console.log("ShadowPay Response:", response.data);
-
-    // Accept true or "true"
-    if (
-      response.data.status !== true &&
-      response.data.status !== "true"
-    ) {
-      return res.status(400).json({
-        error: response.data.message || "ShadowPay failed",
-      });
-    }
-
-    await db.collection("payments").doc(orderId).set({
-      userId,
-      amount: Number(amount),
-      credited: false,
-      gateway: "shadowpay",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.json({
-      payment_url: response.data.result.payment_url,
-      order_id: orderId,
-    });
-  } catch (error) {
-    console.error(
-      "ShadowPay Error:",
-      error.response?.data || error.message
-    );
-
-    return res.status(500).json({
-      error: "ShadowPay failed",
-    });
+  } catch (err) {
+    console.log("Error:", err.message);
+    res.status(500).json({ error: "Payment failed" });
   }
 });
 
@@ -170,12 +88,6 @@ app.post("/create-order-shadowpay", async (req, res) => {
 app.post("/verify-payment", async (req, res) => {
   try {
     const { orderId } = req.body;
-
-    if (!orderId) {
-      return res.status(400).json({
-        error: "Missing orderId",
-      });
-    }
 
     const response = await axios.post(
       "https://api.zapupi.com/api/order-status",
@@ -195,156 +107,169 @@ app.post("/verify-payment", async (req, res) => {
       return res.json({ status: "pending" });
     }
 
-    const paymentRef = db.collection("payments").doc(orderId);
-    const paymentSnap = await paymentRef.get();
+    const ref = db.collection("payments").doc(orderId);
+    const snap = await ref.get();
 
-    if (!paymentSnap.exists) {
-      return res.status(404).json({
-        error: "Payment not found",
-      });
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Not found" });
     }
 
-    const paymentData = paymentSnap.data();
+    const data = snap.data();
 
-    if (paymentData.credited) {
+    if (data.credited) {
       return res.json({ status: "already_credited" });
     }
 
-    await db.collection("users").doc(paymentData.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(
-        paymentData.amount
-      ),
+    await db.collection("users").doc(data.userId).update({
+      wallet_balance: admin.firestore.FieldValue.increment(data.amount),
     });
 
-    await paymentRef.update({
-      credited: true,
-    });
+    await ref.update({ credited: true });
 
-    return res.json({ status: "credited" });
-  } catch (error) {
-    console.error("ZapUPI Verify Error:", error.message);
+    res.json({ status: "credited" });
 
-    return res.status(500).json({
-      error: "Verification failed",
-    });
+  } catch (err) {
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// VERIFY PAYMENT (SHADOWPAY)
+// CREATE ORDER (IMB)
 // =================================================
-app.post("/verify-shadowpay", async (req, res) => {
+app.post("/create-order-imb", async (req, res) => {
+  try {
+    const { userId, amount, mobile } = req.body;
+
+    if (!userId || !amount) {
+      return res.status(400).json({ error: "Missing data" });
+    }
+
+    const orderId = "IMB" + Date.now();
+
+    const response = await axios.post(
+      `${IMB_BASE_URL}api/create-order`,
+      {
+        order_id: orderId,
+        amount: Number(amount).toFixed(2),
+        customer_mobile: mobile || "",
+        redirect_url: "https://a47d.flutterflow.app/success"
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${IMB_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const paymentUrl =
+      response.data.payment_url ||
+      response.data?.data?.payment_url;
+
+    if (!paymentUrl) {
+      console.log("IMB RESPONSE:", response.data);
+      return res.status(400).json({ error: "Payment failed" });
+    }
+
+    await db.collection("payments").doc(orderId).set({
+      userId,
+      amount: Number(amount),
+      credited: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({
+      payment_url: paymentUrl,
+      order_id: orderId,
+    });
+
+  } catch (err) {
+    console.log("IMB Error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Payment failed" });
+  }
+});
+
+// =================================================
+// VERIFY PAYMENT (IMB)
+// =================================================
+app.post("/verify-imb", async (req, res) => {
   try {
     const { orderId } = req.body;
 
-    if (!orderId) {
-      return res.status(400).json({
-        error: "Missing orderId",
-      });
-    }
-
-    const params = new URLSearchParams();
-    params.append("user_token", SHADOWPAY_TOKEN);
-    params.append("order_id", orderId);
-
-    const response = await axios.post(
-      "https://www.pay.shadowlink.in/api/check-order-status",
-      params,
+    const response = await axios.get(
+      `${IMB_BASE_URL}api/order-status/${orderId}`,
       {
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Bearer ${IMB_API_TOKEN}`,
         },
       }
     );
 
     const data = response.data;
 
-    console.log("ShadowPay Verify:", data);
-
-    // ✅ Correct status check
-    if (data.status !== "COMPLETED") {
+    if (data.status !== "SUCCESS") {
       return res.json({ status: "pending" });
     }
 
-    const paymentRef = db.collection("payments").doc(orderId);
-    const paymentSnap = await paymentRef.get();
+    const ref = db.collection("payments").doc(orderId);
+    const snap = await ref.get();
 
-    if (!paymentSnap.exists) {
-      return res.status(404).json({
-        error: "Payment not found",
-      });
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Not found" });
     }
 
-    const paymentData = paymentSnap.data();
+    const payment = snap.data();
 
-    if (paymentData.credited) {
+    if (payment.credited) {
       return res.json({ status: "already_credited" });
     }
 
-    await db.collection("users").doc(paymentData.userId).update({
+    await db.collection("users").doc(payment.userId).update({
       wallet_balance: admin.firestore.FieldValue.increment(
-        paymentData.amount
+        payment.amount
       ),
     });
 
-    await paymentRef.update({
-      credited: true,
-    });
+    await ref.update({ credited: true });
 
-    return res.json({ status: "credited" });
-  } catch (error) {
-    console.error(
-      "Shadow Verify Error:",
-      error.response?.data || error.message
-    );
+    res.json({ status: "credited" });
 
-    return res.status(500).json({
-      error: "Verification failed",
-    });
+  } catch (err) {
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// WEBHOOK (SHADOWPAY)
+// WEBHOOK (IMB)
 // =================================================
-app.post("/shadow-webhook", async (req, res) => {
+app.post("/imb-webhook", async (req, res) => {
   try {
-    console.log("Webhook:", req.body);
-
     const order_id = req.body.order_id;
     const status = req.body.status;
 
-    if (!order_id || status !== "COMPLETED") {
+    if (!order_id || status !== "SUCCESS") {
       return res.send("Ignored");
     }
 
-    const paymentRef = db.collection("payments").doc(order_id);
-    const paymentSnap = await paymentRef.get();
+    const ref = db.collection("payments").doc(order_id);
+    const snap = await ref.get();
 
-    if (!paymentSnap.exists) {
-      return res.send("No payment");
-    }
+    if (!snap.exists) return res.send("No payment");
 
-    const paymentData = paymentSnap.data();
+    const data = snap.data();
 
-    if (paymentData.credited) {
-      return res.send("Already credited");
-    }
+    if (data.credited) return res.send("Already");
 
-    await db.collection("users").doc(paymentData.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(
-        paymentData.amount
-      ),
+    await db.collection("users").doc(data.userId).update({
+      wallet_balance: admin.firestore.FieldValue.increment(data.amount),
     });
 
-    await paymentRef.update({
-      credited: true,
-    });
+    await ref.update({ credited: true });
 
-    return res.send("Credited");
+    res.send("Success");
+
   } catch (err) {
-    console.log("Webhook Error:", err.message);
-    return res.status(500).send("Error");
+    res.status(500).send("Error");
   }
 });
 
