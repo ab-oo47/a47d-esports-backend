@@ -6,6 +6,7 @@ const admin = require("firebase-admin");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ================= FIREBASE =================
 admin.initializeApp({
@@ -14,10 +15,6 @@ admin.initializeApp({
   ),
 });
 const db = admin.firestore();
-
-// ================= ZAPUPI =================
-const TOKEN_KEY = "4b63fb4ebfbb9671aa5f47d6e3a49c21";
-const SECRET_KEY = "a062630e79e1682b3e305c895f9f503c";
 
 // ================= IMB =================
 const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
@@ -28,45 +25,7 @@ app.get("/", (req, res) => {
 });
 
 // =================================================
-// CREATE PAYMENT (ZAPUPI)
-// =================================================
-app.post("/create-payment", async (req, res) => {
-  try {
-    const { userId, amount, mobile } = req.body;
-
-    const orderId = "ORD" + Date.now();
-
-    const response = await axios.post(
-      "https://api.zapupi.com/api/create-order",
-      new URLSearchParams({
-        token_key: TOKEN_KEY,
-        secret_key: SECRET_KEY,
-        amount: Number(amount),
-        order_id: orderId,
-        custumer_mobile: mobile || "",
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-
-    await db.collection("payments").doc(orderId).set({
-      userId,
-      amount: Number(amount),
-      credited: false,
-    });
-
-    res.json({
-      payment_url: response.data.payment_url,
-      order_id: orderId,
-    });
-
-  } catch (err) {
-    console.log("Zap Error:", err.response?.data || err.message);
-    res.status(500).json({ error: "Zap failed" });
-  }
-});
-
-// =================================================
-// CREATE ORDER (IMB)
+// CREATE ORDER
 // =================================================
 app.post("/create-order-imb", async (req, res) => {
   try {
@@ -81,7 +40,7 @@ app.post("/create-order-imb", async (req, res) => {
         user_token: IMB_API_TOKEN,
         amount: Number(amount),
         order_id: orderId,
-        redirect_url: "", // no redirect
+        redirect_url: "",
         remark1: userId,
         remark2: "coins",
       }),
@@ -92,16 +51,12 @@ app.post("/create-order-imb", async (req, res) => {
       }
     );
 
-    console.log("IMB RESPONSE:", response.data);
-
     const paymentUrl =
       response.data.payment_url ||
       response.data?.result?.payment_url;
 
     if (!paymentUrl) {
-      return res.status(400).json({
-        error: response.data || "Payment failed",
-      });
+      return res.status(400).json({ error: "Payment failed" });
     }
 
     await db.collection("payments").doc(orderId).set({
@@ -116,16 +71,60 @@ app.post("/create-order-imb", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("🔥 IMB ERROR:", err.response?.data || err.message);
-
-    res.status(500).json({
-      error: err.response?.data || "Payment failed",
-    });
+    res.status(500).json({ error: "Create order failed" });
   }
 });
 
 // =================================================
-// VERIFY PAYMENT (IMB) ✅ FIXED
+// 🔥 COMMON CREDIT FUNCTION (REUSABLE)
+// =================================================
+const creditCoinsIfNeeded = async (orderId) => {
+  const ref = db.collection("payments").doc(orderId);
+  const snap = await ref.get();
+
+  if (!snap.exists) return "no_payment";
+
+  const payment = snap.data();
+
+  // ✅ ALREADY CREDITED → STOP
+  if (payment.credited) return "already";
+
+  // 🔍 CHECK STATUS FROM IMB
+  const response = await axios.post(
+    "https://secure-stage.imb.org.in/api/check-order-status",
+    new URLSearchParams({
+      user_token: IMB_API_TOKEN,
+      order_id: orderId,
+    }),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    }
+  );
+
+  const status =
+    response.data.status ||
+    response.data?.result?.txnStatus ||
+    response.data?.result?.status;
+
+  // ❌ NOT SUCCESS → STOP
+  if (status !== "SUCCESS" && status !== "COMPLETED") {
+    return "pending";
+  }
+
+  // ✅ CREDIT COINS
+  await db.collection("users").doc(payment.userId).update({
+    wallet_balance: admin.firestore.FieldValue.increment(payment.amount),
+  });
+
+  await ref.update({ credited: true });
+
+  return "credited";
+};
+
+// =================================================
+// VERIFY (MANUAL BACKUP)
 // =================================================
 app.post("/verify-imb", async (req, res) => {
   try {
@@ -135,120 +134,37 @@ app.post("/verify-imb", async (req, res) => {
       return res.status(400).json({ error: "Missing orderId" });
     }
 
-    console.log("🔍 VERIFY REQUEST:", orderId);
+    const result = await creditCoinsIfNeeded(orderId);
 
-    const response = await axios.post(
-      "https://secure-stage.imb.org.in/api/check-order-status",
-      new URLSearchParams({
-        user_token: IMB_API_TOKEN,
-        order_id: orderId,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-
-    console.log("🔍 VERIFY RESPONSE:", response.data);
-
-    const data = response.data;
-
-    const status =
-      data.status ||
-      data?.result?.txnStatus ||
-      data?.result?.status;
-
-    if (status !== "SUCCESS" && status !== "COMPLETED") {
-      return res.json({ status: "pending" });
-    }
-
-    const ref = db.collection("payments").doc(orderId);
-    const snap = await ref.get();
-
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Payment not found" });
-    }
-
-    const payment = snap.data();
-
-    if (payment.credited) {
-      return res.json({ status: "already_credited" });
-    }
-
-    // ✅ CREDIT COINS
-    await db.collection("users").doc(payment.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(payment.amount),
-    });
-
-    await ref.update({ credited: true });
-
-    console.log("✅ COINS CREDITED (VERIFY):", orderId);
-
-    res.json({ status: "credited" });
+    res.json({ status: result });
 
   } catch (err) {
-    console.log("❌ VERIFY ERROR:", err.response?.data || err.message);
-
-    res.status(500).json({
-      error: err.response?.data || "Verification failed",
-    });
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// WEBHOOK (OPTIONAL BACKUP)
+// WEBHOOK (AUTO CREDIT)
 // =================================================
 app.post("/imb-webhook", async (req, res) => {
   try {
-    console.log("🔥 WEBHOOK HIT:", req.body);
+    console.log("🔥 WEBHOOK:", req.body);
 
-    const order_id = req.body.order_id || req.body.orderId;
+    const orderId =
+      req.body.order_id ||
+      req.body.orderId ||
+      req.body?.result?.orderId;
 
-    if (!order_id) return res.send("Invalid");
+    if (!orderId) return res.send("No order");
 
-    const response = await axios.post(
-      "https://secure-stage.imb.org.in/api/check-order-status",
-      new URLSearchParams({
-        user_token: IMB_API_TOKEN,
-        order_id: order_id,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
+    const result = await creditCoinsIfNeeded(orderId);
 
-    const status =
-      response.data.status ||
-      response.data?.result?.txnStatus;
+    console.log("WEBHOOK RESULT:", result);
 
-    if (status !== "SUCCESS" && status !== "COMPLETED") {
-      return res.send("Not success");
-    }
-
-    const ref = db.collection("payments").doc(order_id);
-    const snap = await ref.get();
-
-    if (!snap.exists) return res.send("No payment");
-
-    const payment = snap.data();
-
-    if (payment.credited) return res.send("Already");
-
-    await db.collection("users").doc(payment.userId).update({
-      wallet_balance: admin.firestore.FieldValue.increment(payment.amount),
-    });
-
-    await ref.update({ credited: true });
-
-    console.log("✅ COINS CREDITED (WEBHOOK):", order_id);
-
-    res.send("Success");
+    res.send("OK");
 
   } catch (err) {
-    console.log("❌ WEBHOOK ERROR:", err.response?.data || err.message);
+    console.log("WEBHOOK ERROR:", err.message);
     res.status(500).send("Error");
   }
 });
