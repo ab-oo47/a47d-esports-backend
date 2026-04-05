@@ -134,7 +134,7 @@ app.post("/verify-payment", async (req, res) => {
 });
 
 // =================================================
-// CREATE ORDER (IMB)
+// CREATE ORDER (IMB)  ✅ FIXED
 // =================================================
 app.post("/create-order-imb", async (req, res) => {
   try {
@@ -150,7 +150,7 @@ app.post("/create-order-imb", async (req, res) => {
       `${IMB_BASE_URL}api/create-order`,
       {
         order_id: orderId,
-        amount: Number(amount).toFixed(2),
+        amount: Number(amount), // ✅ FIXED (no toFixed)
         customer_mobile: mobile || "",
         redirect_url: "https://a47d.flutterflow.app/success"
       },
@@ -162,12 +162,13 @@ app.post("/create-order-imb", async (req, res) => {
       }
     );
 
+    console.log("IMB RESPONSE:", response.data);
+
     const paymentUrl =
       response.data.payment_url ||
       response.data?.data?.payment_url;
 
     if (!paymentUrl) {
-      console.log("IMB RESPONSE:", response.data);
       return res.status(400).json({ error: "Payment failed" });
     }
 
