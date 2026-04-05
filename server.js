@@ -45,9 +45,7 @@ app.post("/create-payment", async (req, res) => {
         order_id: orderId,
         custumer_mobile: mobile || "",
       }),
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      }
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
 
     await db.collection("payments").doc(orderId).set({
@@ -127,21 +125,41 @@ app.post("/create-order-imb", async (req, res) => {
 });
 
 // =================================================
-// VERIFY PAYMENT (IMB) → PRIMARY CREDIT METHOD
+// VERIFY PAYMENT (IMB) ✅ FIXED
 // =================================================
 app.post("/verify-imb", async (req, res) => {
   try {
     const { orderId } = req.body;
 
-    const response = await axios.get(
-      `https://secure-stage.imb.org.in/api/order-status/${orderId}`
+    if (!orderId) {
+      return res.status(400).json({ error: "Missing orderId" });
+    }
+
+    console.log("🔍 VERIFY REQUEST:", orderId);
+
+    const response = await axios.post(
+      "https://secure-stage.imb.org.in/api/check-order-status",
+      new URLSearchParams({
+        user_token: IMB_API_TOKEN,
+        order_id: orderId,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
     );
 
-    console.log("VERIFY RESPONSE:", response.data);
+    console.log("🔍 VERIFY RESPONSE:", response.data);
 
     const data = response.data;
 
-    if (data.status !== "SUCCESS") {
+    const status =
+      data.status ||
+      data?.result?.txnStatus ||
+      data?.result?.status;
+
+    if (status !== "SUCCESS" && status !== "COMPLETED") {
       return res.json({ status: "pending" });
     }
 
@@ -149,7 +167,7 @@ app.post("/verify-imb", async (req, res) => {
     const snap = await ref.get();
 
     if (!snap.exists) {
-      return res.status(404).json({ error: "Not found" });
+      return res.status(404).json({ error: "Payment not found" });
     }
 
     const payment = snap.data();
@@ -170,13 +188,16 @@ app.post("/verify-imb", async (req, res) => {
     res.json({ status: "credited" });
 
   } catch (err) {
-    console.log("VERIFY ERROR:", err.response?.data || err.message);
-    res.status(500).json({ error: "Verification failed" });
+    console.log("❌ VERIFY ERROR:", err.response?.data || err.message);
+
+    res.status(500).json({
+      error: err.response?.data || "Verification failed",
+    });
   }
 });
 
 // =================================================
-// WEBHOOK (AUTO BACKGROUND CREDIT)
+// WEBHOOK (OPTIONAL BACKUP)
 // =================================================
 app.post("/imb-webhook", async (req, res) => {
   try {
@@ -186,12 +207,24 @@ app.post("/imb-webhook", async (req, res) => {
 
     if (!order_id) return res.send("Invalid");
 
-    // 🔥 VERIFY AGAIN FOR SAFETY
-    const verifyRes = await axios.get(
-      `https://secure-stage.imb.org.in/api/order-status/${order_id}`
+    const response = await axios.post(
+      "https://secure-stage.imb.org.in/api/check-order-status",
+      new URLSearchParams({
+        user_token: IMB_API_TOKEN,
+        order_id: order_id,
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
     );
 
-    if (verifyRes.data.status !== "SUCCESS") {
+    const status =
+      response.data.status ||
+      response.data?.result?.txnStatus;
+
+    if (status !== "SUCCESS" && status !== "COMPLETED") {
       return res.send("Not success");
     }
 
