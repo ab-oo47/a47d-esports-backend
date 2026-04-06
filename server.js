@@ -26,7 +26,7 @@ app.get("/", (req, res) => {
 });
 
 // =================================================
-// CREATE ORDER
+// CREATE ORDER (FIXED URL ISSUE)
 // =================================================
 app.post("/create-order-imb", async (req, res) => {
   try {
@@ -52,14 +52,23 @@ app.post("/create-order-imb", async (req, res) => {
       }
     );
 
+    console.log("IMB FULL RESPONSE:", response.data);
+
+    // ✅ HANDLE ALL POSSIBLE URL TYPES
     const paymentUrl =
       response.data.payment_url ||
-      response.data?.result?.payment_url;
+      response.data?.result?.payment_url ||
+      response.data?.result?.payment_link ||
+      response.data?.result?.upi_link;
 
     if (!paymentUrl) {
-      return res.status(400).json({ error: "Payment failed" });
+      return res.status(400).json({
+        error: "No payment URL",
+        raw: response.data,
+      });
     }
 
+    // SAVE PAYMENT
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
@@ -123,6 +132,7 @@ const creditCoins = async (orderId) => {
 
   const payment = snap.data();
 
+  // prevent double credit
   if (payment.credited) return "already";
 
   await db.collection("users").doc(payment.userId).update({
@@ -141,7 +151,7 @@ const creditCoins = async (orderId) => {
 };
 
 // =================================================
-// CHECK STATUS (FOR APP)
+// CHECK STATUS (APP)
 // =================================================
 app.get("/check-payment-status", async (req, res) => {
   try {
@@ -213,6 +223,7 @@ app.post("/imb-webhook", async (req, res) => {
       return res.status(200).send("No orderId");
     }
 
+    // ✅ DIRECT CREDIT (NO VERIFY DELAY)
     if (
       status === "SUCCESS" ||
       txnStatus === "COMPLETED" ||
