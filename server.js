@@ -18,6 +18,22 @@ const db = admin.firestore();
 
 // ================= IMB =================
 const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
+const IMB_BASE_URL = "https://secure-stage.imb.org.in/api";
+
+// ================= PUSH FUNCTION =================
+const sendPush = async (token, title, body) => {
+  try {
+    await admin.messaging().send({
+      token: token,
+      notification: {
+        title: title,
+        body: body,
+      },
+    });
+  } catch (err) {
+    console.log("Push Error:", err.message);
+  }
+};
 
 // ================= ROOT =================
 app.get("/", (req, res) => {
@@ -34,7 +50,7 @@ app.post("/create-order-imb", async (req, res) => {
     const orderId = "IMB" + Date.now();
 
     const response = await axios.post(
-      "https://secure-stage.imb.org.in/api/create-order",
+      `${IMB_BASE_URL}/create-order`,
       new URLSearchParams({
         customer_mobile: mobile,
         user_token: IMB_API_TOKEN,
@@ -63,6 +79,8 @@ app.post("/create-order-imb", async (req, res) => {
       userId,
       amount: Number(amount),
       credited: false,
+      status: "PENDING",
+      createdAt: new Date(),
     });
 
     res.json({
@@ -71,27 +89,17 @@ app.post("/create-order-imb", async (req, res) => {
     });
 
   } catch (err) {
+    console.error("CREATE ORDER ERROR:", err.message);
     res.status(500).json({ error: "Create order failed" });
   }
 });
 
 // =================================================
-// 🔥 COMMON CREDIT FUNCTION (REUSABLE)
+// VERIFY IMB
 // =================================================
-const creditCoinsIfNeeded = async (orderId) => {
-  const ref = db.collection("payments").doc(orderId);
-  const snap = await ref.get();
-
-  if (!snap.exists) return "no_payment";
-
-  const payment = snap.data();
-
-  // ✅ ALREADY CREDITED → STOP
-  if (payment.credited) return "already";
-
-  // 🔍 CHECK STATUS FROM IMB
+const verifyIMBPayment = async (orderId) => {
   const response = await axios.post(
-    "https://secure-stage.imb.org.in/api/check-order-status",
+    `${IMB_BASE_URL}/check-order-status`,
     new URLSearchParams({
       user_token: IMB_API_TOKEN,
       order_id: orderId,
@@ -103,28 +111,88 @@ const creditCoinsIfNeeded = async (orderId) => {
     }
   );
 
-  const status =
-    response.data.status ||
-    response.data?.result?.txnStatus ||
-    response.data?.result?.status;
+  const apiStatus = response.data.status;
+  const txnStatus = response.data?.result?.txnStatus;
 
-  // ❌ NOT SUCCESS → STOP
-  if (status !== "SUCCESS" && status !== "COMPLETED") {
+  return {
+    success: apiStatus === "SUCCESS" && txnStatus === "COMPLETED",
+    raw: response.data,
+  };
+};
+
+// =================================================
+// CREDIT FUNCTION + PUSH
+// =================================================
+const creditCoinsIfNeeded = async (orderId) => {
+  const ref = db.collection("payments").doc(orderId);
+  const snap = await ref.get();
+
+  if (!snap.exists) return "no_payment";
+
+  const payment = snap.data();
+
+  if (payment.credited) return "already";
+
+  const verify = await verifyIMBPayment(orderId);
+
+  if (!verify.success) {
     return "pending";
   }
 
-  // ✅ CREDIT COINS
+  // ✅ CREDIT USER
   await db.collection("users").doc(payment.userId).update({
     wallet_balance: admin.firestore.FieldValue.increment(payment.amount),
   });
 
-  await ref.update({ credited: true });
+  // ✅ MARK PAYMENT
+  await ref.update({
+    credited: true,
+    status: "SUCCESS",
+    updatedAt: new Date(),
+  });
+
+  // 🔥 SEND PUSH NOTIFICATION
+  try {
+    const userDoc = await db.collection("users").doc(payment.userId).get();
+    const token = userDoc.data()?.fcm_token;
+
+    if (token) {
+      await sendPush(
+        token,
+        "Payment Successful 🎉",
+        "Coins have been added to your wallet."
+      );
+    }
+  } catch (err) {
+    console.log("Push after credit failed:", err.message);
+  }
 
   return "credited";
 };
 
 // =================================================
-// VERIFY (MANUAL BACKUP)
+// CHECK STATUS
+// =================================================
+app.get("/check-payment-status", async (req, res) => {
+  try {
+    const { orderId } = req.query;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "Missing orderId" });
+    }
+
+    const result = await creditCoinsIfNeeded(orderId);
+
+    res.json({ status: result });
+
+  } catch (err) {
+    console.error("CHECK STATUS ERROR:", err.message);
+    res.status(500).json({ error: "Failed" });
+  }
+});
+
+// =================================================
+// VERIFY (MANUAL)
 // =================================================
 app.post("/verify-imb", async (req, res) => {
   try {
@@ -139,12 +207,13 @@ app.post("/verify-imb", async (req, res) => {
     res.json({ status: result });
 
   } catch (err) {
+    console.error("VERIFY ERROR:", err.message);
     res.status(500).json({ error: "Verification failed" });
   }
 });
 
 // =================================================
-// WEBHOOK (AUTO CREDIT)
+// WEBHOOK
 // =================================================
 app.post("/imb-webhook", async (req, res) => {
   try {
@@ -155,17 +224,54 @@ app.post("/imb-webhook", async (req, res) => {
       req.body.orderId ||
       req.body?.result?.orderId;
 
-    if (!orderId) return res.send("No order");
+    if (!orderId) {
+      return res.status(200).send("No orderId");
+    }
 
-    const result = await creditCoinsIfNeeded(orderId);
+    let result = "pending";
 
-    console.log("WEBHOOK RESULT:", result);
+    for (let i = 0; i < 3; i++) {
+      result = await creditCoinsIfNeeded(orderId);
 
-    res.send("OK");
+      if (result === "credited" || result === "already") {
+        break;
+      }
+
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
+    console.log("WEBHOOK FINAL RESULT:", result);
+
+    res.status(200).send("OK");
 
   } catch (err) {
-    console.log("WEBHOOK ERROR:", err.message);
-    res.status(500).send("Error");
+    console.error("WEBHOOK ERROR:", err.message);
+    res.status(200).send("ERROR");
+  }
+});
+
+// =================================================
+// 🔥 GLOBAL NOTIFICATION API
+// =================================================
+app.post("/send-notification", async (req, res) => {
+  try {
+    const { title, body } = req.body;
+
+    const users = await db.collection("users").get();
+
+    for (const doc of users.docs) {
+      const token = doc.data().fcm_token;
+
+      if (token) {
+        await sendPush(token, title, body);
+      }
+    }
+
+    res.json({ message: "Notification sent" });
+
+  } catch (err) {
+    console.error("SEND NOTIFICATION ERROR:", err.message);
+    res.status(500).json({ error: "Failed" });
   }
 });
 
@@ -173,5 +279,5 @@ app.post("/imb-webhook", async (req, res) => {
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
-  console.log("Server running 🚀");
+  console.log("Server running 🚀 on port", PORT);
 });
