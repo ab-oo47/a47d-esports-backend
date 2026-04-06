@@ -18,7 +18,7 @@ const db = admin.firestore();
 
 // ================= IMB =================
 const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
-const IMB_BASE_URL = "https://secure.imb.org.in/api";
+const IMB_BASE_URL = "https://secure-stage.imb.org.in/api";
 
 // ================= ROOT =================
 app.get("/", (req, res) => {
