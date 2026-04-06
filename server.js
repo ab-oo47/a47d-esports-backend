@@ -18,7 +18,7 @@ const db = admin.firestore();
 
 // ================= IMB =================
 const IMB_API_TOKEN = process.env.IMB_API_TOKEN;
-const IMB_BASE_URL = "https://secure.imb.org.in/api"; // ✅ LIVE
+const IMB_BASE_URL = "https://secure.imb.org.in/api";
 
 // ================= ROOT =================
 app.get("/", (req, res) => {
@@ -26,7 +26,7 @@ app.get("/", (req, res) => {
 });
 
 // =================================================
-// CREATE ORDER (FIXED URL ISSUE)
+// CREATE ORDER (FULL FIX + DEBUG)
 // =================================================
 app.post("/create-order-imb", async (req, res) => {
   try {
@@ -52,9 +52,9 @@ app.post("/create-order-imb", async (req, res) => {
       }
     );
 
-    console.log("IMB FULL RESPONSE:", response.data);
+    console.log("IMB FULL RESPONSE:", JSON.stringify(response.data, null, 2));
 
-    // ✅ HANDLE ALL POSSIBLE URL TYPES
+    // ✅ HANDLE ALL URL TYPES
     const paymentUrl =
       response.data.payment_url ||
       response.data?.result?.payment_url ||
@@ -68,7 +68,6 @@ app.post("/create-order-imb", async (req, res) => {
       });
     }
 
-    // SAVE PAYMENT
     await db.collection("payments").doc(orderId).set({
       userId,
       amount: Number(amount),
@@ -83,13 +82,17 @@ app.post("/create-order-imb", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("CREATE ORDER ERROR:", err.message);
-    res.status(500).json({ error: "Create order failed" });
+    console.error("CREATE ORDER FULL ERROR:", err.response?.data || err.message);
+
+    return res.status(500).json({
+      error: "Create order failed",
+      details: err.response?.data || err.message,
+    });
   }
 });
 
 // =================================================
-// VERIFY (BACKUP ONLY)
+// VERIFY (BACKUP)
 // =================================================
 const verifyIMBPayment = async (orderId) => {
   try {
@@ -106,6 +109,8 @@ const verifyIMBPayment = async (orderId) => {
       }
     );
 
+    console.log("VERIFY RESPONSE:", response.data);
+
     const apiStatus = response.data.status;
     const txnStatus = response.data?.result?.txnStatus;
 
@@ -116,7 +121,7 @@ const verifyIMBPayment = async (orderId) => {
         txnStatus === "SUCCESS",
     };
   } catch (err) {
-    console.error("VERIFY ERROR:", err.message);
+    console.error("VERIFY ERROR:", err.response?.data || err.message);
     return { success: false };
   }
 };
@@ -132,7 +137,6 @@ const creditCoins = async (orderId) => {
 
   const payment = snap.data();
 
-  // prevent double credit
   if (payment.credited) return "already";
 
   await db.collection("users").doc(payment.userId).update({
@@ -151,7 +155,7 @@ const creditCoins = async (orderId) => {
 };
 
 // =================================================
-// CHECK STATUS (APP)
+// CHECK STATUS
 // =================================================
 app.get("/check-payment-status", async (req, res) => {
   try {
@@ -178,7 +182,7 @@ app.get("/check-payment-status", async (req, res) => {
 });
 
 // =================================================
-// VERIFY API (MANUAL)
+// VERIFY API
 // =================================================
 app.post("/verify-imb", async (req, res) => {
   try {
@@ -205,7 +209,7 @@ app.post("/verify-imb", async (req, res) => {
 });
 
 // =================================================
-// WEBHOOK (FINAL SOURCE OF TRUTH)
+// WEBHOOK (FINAL SOURCE)
 // =================================================
 app.post("/imb-webhook", async (req, res) => {
   try {
@@ -223,7 +227,6 @@ app.post("/imb-webhook", async (req, res) => {
       return res.status(200).send("No orderId");
     }
 
-    // ✅ DIRECT CREDIT (NO VERIFY DELAY)
     if (
       status === "SUCCESS" ||
       txnStatus === "COMPLETED" ||
